@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photo Spots</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b6b6b; --line: #e3e3e3;
+    --panel: #ffffff; --accent: #d9622b; --accent-soft: #f6d9c9; --bar: #c9c9c9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121212; --fg: #ececec; --muted: #9a9a9a; --line: #2c2c2c;
+            --panel: #1b1b1b; --accent: #f08a4b; --accent-soft: #4a2c1c; --bar: #444; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+               font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display: grid; grid-template-columns: 1fr 380px; height: 100%; }
+  #map { height: 100%; }
+  #panel { overflow-y: auto; border-left: 1px solid var(--line); background: var(--panel); padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 4px; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 6px; }
+  .muted { color: var(--muted); }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--bg); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .list-item { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .list-item img { width: 64px; height: 48px; object-fit: cover; border-radius: 4px; background: var(--line); flex: none; }
+  .list-item .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+                  -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .cover { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 6px; background: var(--line); }
+  .stats { display: flex; gap: 16px; margin: 8px 0; }
+  .stats b { display: block; font-size: 18px; }
+  .hist { display: flex; align-items: flex-end; gap: 2px; height: 56px; }
+  .hist div { flex: 1; background: var(--bar); border-radius: 2px 2px 0 0; min-height: 1px; }
+  .hist div.peak { background: var(--accent); }
+  .hist-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+  .sun { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+  .grid a { display: block; aspect-ratio: 1; overflow: hidden; border-radius: 4px; background: var(--line); }
+  .grid img { width: 100%; height: 100%; object-fit: cover; }
+  .credit { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  @media (max-width: 760px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: 55% 45%; }
+    #panel { border-left: none; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="map"></div>
+  <aside id="panel"></aside>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const panel = document.getElementById('panel');
+const map = L.map('map', { preferCanvas: true }).setView([1.3, 103.83], 12);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+const layer = L.layerGroup().addTo(map);
+let spots = [];
+let minPhotographers = 3;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtTime = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const label = s => s.label || `Spot #${s.id}`;
+
+async function loadSpots() {
+  const b = map.getBounds();
+  const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(n => n.toFixed(5)).join(',');
+  const res = await fetch(`/api/spots?bbox=${bbox}&limit=400&min_photographers=${minPhotographers}`);
+  spots = (await res.json()).spots || [];
+  layer.clearLayers();
+  const maxScore = Math.max(1, ...spots.map(s => s.score));
+  for (const s of spots) {
+    const r = 4 + 10 * (s.score / maxScore);
+    L.circleMarker([s.lat, s.lon], {
+      radius: r, weight: 1, color: '#7a2f0c', fillColor: '#f08a4b', fillOpacity: 0.75
+    }).bindTooltip(`${esc(label(s))} · ${s.photographer_count} photographers`)
+      .on('click', () => showSpot(s.id))
+      .addTo(layer);
+  }
+  if (!panel.dataset.spot) showList();
+}
+
+function showList() {
+  delete panel.dataset.spot;
+  panel.innerHTML = `
+    <h1>Photo spots</h1>
+    <div class="muted">Spots in view, ranked by how many different photographers shot there.</div>
+    <div class="controls">
+      <button class="primary" id="near">Near me</button>
+      <label>Min photographers
+        <select id="minp">${[2,3,5,10,20].map(n => `<option ${n===minPhotographers?'selected':''}>${n}</option>`).join('')}</select>
+      </label>
+    </div>
+    <div class="muted">${spots.length} spots</div>
+    ${spots.slice(0, 60).map(s => `
+      <div class="list-item" data-id="${s.id}">
+        <img src="${esc(s.cover_thumb)}" alt="" loading="lazy">
+        <div><div class="t">${esc(label(s))}</div>
+          <div class="muted">${s.photographer_count} photographers · ${s.photo_count} photos</div></div>
+      </div>`).join('')}`;
+  panel.querySelectorAll('.list-item').forEach(el => el.onclick = () => showSpot(+el.dataset.id));
+  panel.querySelector('#minp').onchange = e => { minPhotographers = +e.target.value; loadSpots(); };
+  panel.querySelector('#near').onclick = () => {
+    navigator.geolocation?.getCurrentPosition(
+      p => map.setView([p.coords.latitude, p.coords.longitude], 15),
+      () => alert('Could not get your location.'));
+  };
+}
+
+function histogram(values, labels, peakCount = 2) {
+  const max = Math.max(1, ...values);
+  const peaks = [...values].map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).slice(0, peakCount)
+    .filter(([v]) => v > 0).map(([, i]) => i);
+  return `<div class="hist">${values.map((v, i) =>
+      `<div class="${peaks.includes(i) ? 'peak' : ''}" style="height:${100 * v / max}%" title="${labels[i]}: ${v}"></div>`).join('')}</div>`;
+}
+
+async function showSpot(id) {
+  panel.dataset.spot = id;
+  panel.innerHTML = '<div class="muted">Loading…</div>';
+  const res = await fetch(`/api/spots/${id}`);
+  if (!res.ok) { panel.innerHTML = 'Could not load spot.'; return; }
+  const { spot: s, photos, sun } = await res.json();
+  map.panTo([s.lat, s.lon]);
+  const hours = Array.from({ length: 24 }, (_, h) => `${h}:00`);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const timed = s.hour_histogram.reduce((a, b) => a + b, 0);
+  const dated = s.month_histogram.reduce((a, b) => a + b, 0);
+  panel.innerHTML = `
+    <button id="back">← All spots</button>
+    <h2 style="margin-top:12px">${esc(label(s))}</h2>
+    <div class="muted">${s.lat.toFixed(5)}, ${s.lon.toFixed(5)} ·
+      <a href="https://www.google.com/maps/search/?api=1&query=${s.lat},${s.lon}" target="_blank" rel="noopener">Open in Maps</a></div>
+    <div class="stats">
+      <div><b>${s.photographer_count}</b><span class="muted">photographers</span></div>
+      <div><b>${s.photo_count}</b><span class="muted">photos</span></div>
+      <div><b>${Math.round(s.radius_m)} m</b><span class="muted">spread</span></div>
+    </div>
+    <h3>When people shoot here</h3>
+    ${timed >= 3 ? histogram(s.hour_histogram, hours) +
+      '<div class="hist-labels"><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>23h</span></div>'
+      : '<div class="muted">Not enough photos with a time of day yet.</div>'}
+    ${dated >= 6 ? '<h3>Time of year</h3>' + histogram(s.month_histogram, months, 3) +
+      '<div class="hist-labels"><span>Jan</span><span>Apr</span><span>Jul</span><span>Oct</span><span>Dec</span></div>' : ''}
+    <h3>Light today</h3>
+    <div class="sun">
+      <span class="muted">Blue hour</span><span>${fmtTime(sun.morning_blue_hour.start)}–${fmtTime(sun.morning_blue_hour.end)}</span>
+      <span class="muted">Golden hour</span><span>${fmtTime(sun.morning_golden_hour.start)}–${fmtTime(sun.morning_golden_hour.end)}</span>
+      <span class="muted">Golden hour</span><span>${fmtTime(sun.evening_golden_hour.start)}–${fmtTime(sun.evening_golden_hour.end)}</span>
+      <span class="muted">Blue hour</span><span>${fmtTime(sun.evening_blue_hour.start)}–${fmtTime(sun.evening_blue_hour.end)}</span>
+    </div>
+    <h3>Photos (one per photographer)</h3>
+    <div class="grid">${photos.map(p => `
+      <a href="${esc(p.page_url)}" target="_blank" rel="noopener" title="${esc(p.title)} — ${esc(p.photographer)} (${esc(p.license)})">
+        <img src="${esc(p.thumb_url)}" alt="${esc(p.title)}" loading="lazy"></a>`).join('')}</div>
+    <div class="credit">Photos from Wikimedia Commons and Flickr, © their photographers. Click a photo for its licence and source.</div>`;
+  panel.querySelector('#back').onclick = showList;
+}
+
+map.on('moveend', loadSpots);
+loadSpots();
+</script>
+</body>
+</html>

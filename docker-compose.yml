@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: spots
+      POSTGRES_PASSWORD: spots
+      POSTGRES_DB: photospots
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spots -d photospots"]
+      interval: 2s
+      retries: 30
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://spots:spots@db:5432/photospots
+      FLICKR_API_KEY: ${FLICKR_API_KEY:-}
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["serve"]
+
+volumes:
+  pgdata:

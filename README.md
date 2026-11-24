@@ -31,6 +31,9 @@ docker compose run --rm app cluster                 # build spots
 ```
 
 Open http://localhost:8080. Re-run `cluster` after each import.
+
+`ingest-commons` saves progress as it goes. If it stops (Ctrl-C, network error), run it
+again and it skips areas already finished. Use `-fresh` to start over and pick up new uploads.
 For Flickr, put `FLICKR_API_KEY=...` in a `.env` file next to `docker-compose.yml`,
 then `docker compose run --rm app ingest-flickr`.
 

@@ -31,7 +31,15 @@ type Client struct {
 	HTTP      *http.Client
 	UserAgent string
 	Delay     time.Duration // pause between requests, to be polite
+	RetryBase time.Duration // unit for retry backoff
+	Endpoint  string
 	Log       func(format string, args ...any)
+
+	// Optional checkpointing so an interrupted import resumes: boxes for
+	// which IsDone returns true are skipped, and MarkDone is called once a
+	// box (and everything inside it) has been fully imported.
+	IsDone   func(model.BBox) bool
+	MarkDone func(model.BBox) error
 }
 
 func (c *Client) logf(format string, args ...any) {
@@ -45,11 +53,26 @@ func New() *Client {
 		HTTP:      &http.Client{Timeout: 60 * time.Second},
 		UserAgent: "photospots/0.1 (hobby photo-spot finder)",
 		Delay:     time.Second,
+		RetryBase: time.Second,
+		Endpoint:  endpoint,
 	}
 }
 
 // Fetch walks the box and calls emit for each batch of photos found.
 func (c *Client) Fetch(ctx context.Context, box model.BBox, emit func([]model.Photo) error) error {
+	if c.IsDone != nil && c.IsDone(box) {
+		return nil
+	}
+	if err := c.fetch(ctx, box, emit); err != nil {
+		return err
+	}
+	if c.MarkDone != nil {
+		return c.MarkDone(box)
+	}
+	return nil
+}
+
+func (c *Client) fetch(ctx context.Context, box model.BBox, emit func([]model.Photo) error) error {
 	ids, err := c.pageIDs(ctx, box)
 	c.logf("box %.4f,%.4f..%.4f,%.4f: %d files, err=%v", box.MinLon, box.MinLat, box.MaxLon, box.MaxLat, len(ids), err)
 	if err != nil {
@@ -98,6 +121,15 @@ func apiErrCode(err error) string {
 	return ""
 }
 
+// Temporary server-side conditions worth waiting out.
+var retryable = map[string]bool{
+	"maxlag":                          true,
+	"cirrussearch-too-busy-error":     true,
+	"ratelimited":                     true,
+	"readonly":                        true,
+	"internal_api_error_DBQueryError": true,
+}
+
 func (c *Client) get(ctx context.Context, params url.Values, out any) error {
 	params.Set("format", "json")
 	params.Set("formatversion", "2")
@@ -108,8 +140,8 @@ func (c *Client) get(ctx context.Context, params url.Values, out any) error {
 		if err := sleep(ctx, c.Delay+wait); err != nil {
 			return err
 		}
-		wait = time.Duration(attempt+1) * 2 * time.Second
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+params.Encode(), nil)
+		wait = time.Duration(attempt+1) * 2 * c.RetryBase
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Endpoint+"?"+params.Encode(), nil)
 		if err != nil {
 			return err
 		}
@@ -144,8 +176,10 @@ func (c *Client) get(ctx context.Context, params url.Values, out any) error {
 			continue
 		}
 		if err := json.Unmarshal(raw, &env); err == nil && env.Error != nil {
-			if env.Error.Code == "maxlag" {
+			if retryable[env.Error.Code] {
+				c.logf("API busy (%s), attempt %d; retrying", env.Error.Code, attempt+1)
 				lastErr = env.Error
+				wait = time.Duration(attempt+1) * 5 * c.RetryBase
 				continue
 			}
 			return env.Error

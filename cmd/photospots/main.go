@@ -2,7 +2,7 @@
 // serves them.
 //
 //	photospots migrate
-//	photospots ingest-commons [-region singapore]
+//	photospots ingest-commons [-region singapore] [-fresh]
 //	photospots ingest-flickr  [-region singapore] [-since 2004-01-01]   (needs FLICKR_API_KEY)
 //	photospots cluster        [-region singapore]
 //	photospots serve          [-addr :8080]
@@ -42,6 +42,7 @@ func main() {
 	fsFlags := flag.NewFlagSet(cmd, flag.ExitOnError)
 	regionName := fsFlags.String("region", "singapore", "region to work on")
 	addr := fsFlags.String("addr", ":8080", "listen address (serve)")
+	fresh := fsFlags.Bool("fresh", false, "Commons: ignore saved progress and re-import everything")
 	since := fsFlags.String("since", "", "Flickr: only photos uploaded after this date (default: resume from last run, else 2004-01-01)")
 	fsFlags.Parse(args)
 
@@ -66,21 +67,46 @@ func main() {
 		log.Print("schema up to date")
 	case "ingest-commons":
 		check(st.Migrate(ctx))
-		total := 0
-		start := time.Now()
+		prefix := "commons:" + region.Name + ":done:"
+		if *fresh {
+			check(st.ClearState(ctx, prefix))
+		}
+		done, err := st.StateKeys(ctx, prefix)
+		check(err)
+		boxKey := func(b model.BBox) string {
+			return fmt.Sprintf("%s%.5f,%.5f,%.5f,%.5f", prefix, b.MinLon, b.MinLat, b.MaxLon, b.MaxLat)
+		}
+		if len(done) > 0 {
+			log.Printf("commons: resuming, %d areas already done (use -fresh to start over)", len(done))
+		}
+
+		total, areas := 0, 0
+		start, lastLog := time.Now(), time.Now()
+		progress := func(force bool) {
+			if force || time.Since(lastLog) > 15*time.Second {
+				log.Printf("commons: %d photos imported, %d areas finished (%s)", total, areas, time.Since(start).Round(time.Second))
+				lastLog = time.Now()
+			}
+		}
 		cc := commons.New()
 		if os.Getenv("VERBOSE") != "" {
 			cc.Log = log.Printf
 		}
-		err := cc.Fetch(ctx, region.BBox, func(ph []model.Photo) error {
+		cc.IsDone = func(b model.BBox) bool { return done[boxKey(b)] }
+		cc.MarkDone = func(b model.BBox) error {
+			areas++
+			progress(false)
+			return st.SetState(ctx, boxKey(b), time.Now().UTC().Format(time.RFC3339))
+		}
+		log.Printf("commons: importing %s (progress every 15s)", region.Name)
+		err = cc.Fetch(ctx, region.BBox, func(ph []model.Photo) error {
 			total += len(ph)
-			if total%1000 < len(ph) {
-				log.Printf("commons: %d photos so far (%s)", total, time.Since(start).Round(time.Second))
-			}
+			progress(false)
 			return st.UpsertPhotos(ctx, ph)
 		})
+		progress(true)
 		check(err)
-		log.Printf("commons: done, %d photos in %s", total, time.Since(start).Round(time.Second))
+		log.Printf("commons: done. Run `cluster` next.")
 	case "ingest-flickr":
 		key := os.Getenv("FLICKR_API_KEY")
 		if key == "" {

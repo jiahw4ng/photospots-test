@@ -104,3 +104,23 @@ func (s *Store) PhotosIn(ctx context.Context, box model.BBox) ([]LocatedPhoto, e
 		return p, err
 	})
 }
+
+// ClearState removes every checkpoint whose key starts with prefix.
+func (s *Store) ClearState(ctx context.Context, prefix string) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM ingest_state WHERE starts_with(key, $1)`, prefix)
+	return err
+}
+
+// StateKeys returns every checkpoint key starting with prefix.
+func (s *Store) StateKeys(ctx context.Context, prefix string) (map[string]bool, error) {
+	rows, err := s.DB.Query(ctx, `SELECT key FROM ingest_state WHERE starts_with(key, $1)`, prefix)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	out := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		out[k] = true
+	}
+	return out, err
+}

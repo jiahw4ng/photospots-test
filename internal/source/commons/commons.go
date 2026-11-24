@@ -73,7 +73,7 @@ func (c *Client) Fetch(ctx context.Context, box model.BBox, emit func([]model.Ph
 }
 
 func (c *Client) fetch(ctx context.Context, box model.BBox, emit func([]model.Photo) error) error {
-	ids, err := c.pageIDs(ctx, box)
+	ids, err := c.search(ctx, box)
 	c.logf("box %.4f,%.4f..%.4f,%.4f: %d files, err=%v", box.MinLon, box.MinLat, box.MaxLon, box.MaxLat, len(ids), err)
 	if err != nil {
 		if apiErrCode(err) == "toobig" {
@@ -189,29 +189,29 @@ func (c *Client) get(ctx context.Context, params url.Values, out any) error {
 	return lastErr
 }
 
-func (c *Client) pageIDs(ctx context.Context, box model.BBox) ([]int, error) {
+// hit is one geosearch result. Its coordinates are the file's primary
+// (camera) location, so we never need a separate coordinates lookup.
+type hit struct {
+	PageID   int `json:"pageid"`
+	Lat, Lon float64
+}
+
+func (c *Client) search(ctx context.Context, box model.BBox) ([]hit, error) {
 	p := url.Values{}
 	p.Set("action", "query")
 	p.Set("list", "geosearch")
 	p.Set("gsnamespace", "6")
 	p.Set("gslimit", strconv.Itoa(pageLimit))
-	p.Set("gsprop", "")
 	p.Set("gsbbox", fmt.Sprintf("%f|%f|%f|%f", box.MaxLat, box.MinLon, box.MinLat, box.MaxLon))
 	var res struct {
 		Query struct {
-			Geosearch []struct {
-				PageID int `json:"pageid"`
-			} `json:"geosearch"`
+			Geosearch []hit `json:"geosearch"`
 		} `json:"query"`
 	}
 	if err := c.get(ctx, p, &res); err != nil {
 		return nil, err
 	}
-	ids := make([]int, len(res.Query.Geosearch))
-	for i, g := range res.Query.Geosearch {
-		ids[i] = g.PageID
-	}
-	return ids, nil
+	return res.Query.Geosearch, nil
 }
 
 type metaValue struct {
@@ -219,13 +219,8 @@ type metaValue struct {
 }
 
 type page struct {
-	PageID      int    `json:"pageid"`
-	Title       string `json:"title"`
-	Coordinates []struct {
-		Lat     float64 `json:"lat"`
-		Lon     float64 `json:"lon"`
-		Primary bool    `json:"primary"`
-	} `json:"coordinates"`
+	PageID    int    `json:"pageid"`
+	Title     string `json:"title"`
 	ImageInfo []struct {
 		User           string               `json:"user"`
 		ThumbURL       string               `json:"thumburl"`
@@ -235,16 +230,17 @@ type page struct {
 	} `json:"imageinfo"`
 }
 
-func (c *Client) details(ctx context.Context, ids []int) ([]model.Photo, error) {
-	strIDs := make([]string, len(ids))
-	for i, id := range ids {
-		strIDs[i] = strconv.Itoa(id)
+func (c *Client) details(ctx context.Context, hits []hit) ([]model.Photo, error) {
+	strIDs := make([]string, len(hits))
+	where := make(map[int]hit, len(hits))
+	for i, h := range hits {
+		strIDs[i] = strconv.Itoa(h.PageID)
+		where[h.PageID] = h
 	}
 	base := url.Values{}
 	base.Set("action", "query")
 	base.Set("pageids", strings.Join(strIDs, "|"))
-	base.Set("prop", "coordinates|imageinfo")
-	base.Set("coprimary", "primary")
+	base.Set("prop", "imageinfo")
 	base.Set("iiprop", "url|user|mime|extmetadata")
 	base.Set("iiurlwidth", "400")
 	base.Set("iiextmetadatafilter", "DateTimeOriginal|LicenseShortName|Artist|ObjectName")
@@ -272,9 +268,6 @@ func (c *Client) details(ctx context.Context, ids []int) ([]model.Photo, error) 
 			pg := pg
 			if have, ok := pages[pg.PageID]; ok {
 				// Continuations return the same pages with the props not yet sent.
-				if len(have.Coordinates) == 0 {
-					have.Coordinates = pg.Coordinates
-				}
 				if len(have.ImageInfo) == 0 {
 					have.ImageInfo = pg.ImageInfo
 				}
@@ -293,15 +286,15 @@ func (c *Client) details(ctx context.Context, ids []int) ([]model.Photo, error) 
 
 	out := make([]model.Photo, 0, len(pages))
 	for _, pg := range pages {
-		if ph, ok := toPhoto(pg); ok {
+		if ph, ok := toPhoto(pg, where[pg.PageID]); ok {
 			out = append(out, ph)
 		}
 	}
 	return out, nil
 }
 
-func toPhoto(pg *page) (model.Photo, bool) {
-	if len(pg.Coordinates) == 0 || len(pg.ImageInfo) == 0 {
+func toPhoto(pg *page, h hit) (model.Photo, bool) {
+	if len(pg.ImageInfo) == 0 || (h.Lat == 0 && h.Lon == 0) {
 		return model.Photo{}, false
 	}
 	ii := pg.ImageInfo[0]
@@ -323,8 +316,8 @@ func toPhoto(pg *page) (model.Photo, bool) {
 		SourceID:     strconv.Itoa(pg.PageID),
 		Photographer: strings.ToLower(strings.TrimSpace(photographer)),
 		Title:        title,
-		Lat:          pg.Coordinates[0].Lat,
-		Lon:          pg.Coordinates[0].Lon,
+		Lat:          h.Lat,
+		Lon:          h.Lon,
 		ThumbURL:     ii.ThumbURL,
 		PageURL:      ii.DescriptionURL,
 		License:      meta("LicenseShortName"),

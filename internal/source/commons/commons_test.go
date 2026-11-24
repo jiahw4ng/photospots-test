@@ -37,16 +37,18 @@ func fakeCommons(t *testing.T) (*httptest.Server, *atomic.Int32) {
 				return
 			}
 			id := int(left*10000) + int(bottom*10000)*7
-			fmt.Fprintf(w, `{"query":{"geosearch":[{"pageid":%d}]}}`, id)
+			fmt.Fprintf(w, `{"query":{"geosearch":[{"pageid":%d,"lat":%f,"lon":%f}]}}`, id, bottom, left)
 			return
+		}
+		if strings.Contains(q.Get("prop"), "coordinates") {
+			t.Errorf("details request asked for coordinates; they come from geosearch")
 		}
 		var pages []map[string]any
 		for _, s := range strings.Split(q.Get("pageids"), "|") {
 			id, _ := strconv.Atoi(s)
 			pages = append(pages, map[string]any{
-				"pageid":      id,
-				"title":       fmt.Sprintf("File:Photo %d.jpg", id),
-				"coordinates": []map[string]any{{"lat": 1.3, "lon": 103.8, "primary": true}},
+				"pageid": id,
+				"title":  fmt.Sprintf("File:Photo %d.jpg", id),
 				"imageinfo": []map[string]any{{
 					"user": "Panoramio upload bot", "thumburl": "t", "descriptionurl": "d", "mime": "image/jpeg",
 					"extmetadata": map[string]any{
@@ -84,6 +86,9 @@ func TestFetchRetriesBusySplitsAndResumes(t *testing.T) {
 	}
 	if len(photos) != 4 {
 		t.Fatalf("got %d photos, want 4 (one per quadrant)", len(photos))
+	}
+	if photos[0].Lat < 1.2 || photos[0].Lon < 103.6 {
+		t.Fatalf("coordinates not taken from geosearch: %+v", photos[0])
 	}
 	if photos[0].Photographer != "jane" || !photos[0].HasTime || photos[0].TakenLocal.Hour() != 18 {
 		t.Fatalf("bad photo parse: %+v", photos[0])
